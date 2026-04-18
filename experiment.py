@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import confusion_matrix, classification_report
-import lightgbm as lgb
+from sklearn.linear_model import LogisticRegression
 
 from prepare import load_data, evaluate, TIME_BUDGET
 
@@ -24,38 +24,32 @@ from prepare import load_data, evaluate, TIME_BUDGET
 # AGENT MODIFIES THIS SECTION
 # ---------------------------------------------------------------------------
 
-MODEL_NAME = "LGBMClassifier"
-
+MODEL_NAME = "LogisticRegression"
 
 def build_model():
     scaler = StandardScaler()
-    clf = lgb.LGBMClassifier(
-        n_estimators=1000,
-        learning_rate=0.05,
-        max_depth=5,
-        num_leaves=31,
-        subsample=0.8,
-        colsample_bytree=0.7,
-        min_child_samples=10,
-        reg_alpha=0.0,
-        reg_lambda=1.0,
+
+    clf = LogisticRegression(
+        C=1.0,
+        max_iter=1000,
         random_state=42,
-        device='gpu',
-        n_jobs=-1,
-        verbose=-1,
+        n_jobs=-1
     )
     return scaler, clf
 
-
 def train(scaler, model, X_train, y_train, X_val, y_val):
     X_train_s = scaler.fit_transform(X_train)
-    X_val_s   = scaler.transform(X_val)
-    model.fit(
-        X_train_s, y_train,
-        eval_set=[(X_train_s, y_train), (X_val_s, y_val)],
-        callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(period=-1)],
-    )
+    model.fit(X_train_s, y_train)
     return scaler, model
+
+class ModelWrapper:
+    def __init__(self, scaler, model):
+        self.scaler = scaler
+        self.model = model
+
+    def predict(self, X):
+        X_s = self.scaler.transform(X)
+        return self.model.predict(X_s)
 
 # ---------------------------------------------------------------------------
 # Main
@@ -67,10 +61,6 @@ if __name__ == "__main__":
 
     scaler, model = build_model()
     scaler, model = train(scaler, model, X_train, y_train, X_val, y_val)
-
-    class ModelWrapper:
-        def __init__(self, s, m): self.s, self.m = s, m
-        def predict(self, X): return self.m.predict(self.s.transform(X))
 
     wrapped = ModelWrapper(scaler, model)
     t1 = time.time()
@@ -100,33 +90,20 @@ if __name__ == "__main__":
     cm = confusion_matrix(y_val, preds)
     plt.figure(figsize=(6, 5))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-    plt.title('Confusion Matrix')
+    plt.title(f'Confusion Matrix — {MODEL_NAME}')
     plt.ylabel('True Label')
     plt.xlabel('Predicted Label')
     plt.tight_layout()
     plt.savefig(os.path.join(out_dir, 'confusion_matrix.png'))
     plt.close()
 
-    # 2. Training history
-    try:
-        er = model.evals_result_
-        sets = list(er.keys())
-        metrics = list(er[sets[0]].keys())
-        epochs = len(er[sets[0]][metrics[0]])
-        x_axis = range(epochs)
-        fig, ax = plt.subplots(1, 2, figsize=(12, 5))
-        ax[0].plot(x_axis, er[sets[0]][metrics[0]], label='Train')
-        ax[0].plot(x_axis, er[sets[1]][metrics[0]], label='Val')
-        ax[0].legend(); ax[0].set_ylabel(metrics[0]); ax[0].set_title(f'{metrics[0]}')
-        if len(metrics) > 1:
-            ax[1].plot(x_axis, er[sets[0]][metrics[1]], label='Train')
-            ax[1].plot(x_axis, er[sets[1]][metrics[1]], label='Val')
-            ax[1].legend(); ax[1].set_ylabel(metrics[1]); ax[1].set_title(f'{metrics[1]}')
-        plt.tight_layout()
-        plt.savefig(os.path.join(out_dir, 'history.png'))
-        plt.close()
-    except Exception as e:
-        print(f"Warning: history plot failed: {e}")
+    # 2. History plot (Placeholder because linear models do not expose evals_result easily)
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.text(0.5, 0.5, 'Logistic Regression\nNo training history available', 
+            ha='center', va='center', fontsize=14)
+    ax.axis('off')
+    plt.savefig(os.path.join(out_dir, 'history.png'))
+    plt.close()
 
     # 3. Classification report
     rep = classification_report(y_val, preds, output_dict=True)
