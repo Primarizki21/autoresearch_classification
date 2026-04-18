@@ -1,5 +1,0 @@
----
-accuracy:        0.962500
-f1_macro:        0.962497
-training_seconds:0.0
-model:           SupportVectorMachine
