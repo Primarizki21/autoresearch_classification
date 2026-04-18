@@ -1,55 +1,59 @@
+"""
+Mobile Price Classification — experiment script.
+This is the file the AI agent modifies to find the best model.
+
+Usage: uv run experiment.py
+"""
+
 import os
 import time
 import subprocess
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import confusion_matrix, classification_report
-import xgboost as xgb
+import lightgbm as lgb
 
 from prepare import load_data, evaluate, TIME_BUDGET
 
 # ---------------------------------------------------------------------------
 # AGENT MODIFIES THIS SECTION
-# Everything below is fair game: model, hyperparameters, preprocessing, etc.
 # ---------------------------------------------------------------------------
 
+MODEL_NAME = "LGBMClassifier"
+
+
 def build_model():
-    """
-    Build and return the model pipeline.
-    Must implement .fit(X, y) and .predict(X).
-    """
     scaler = StandardScaler()
-    # Use XGBoost with cuda device
-    clf = xgb.XGBClassifier(
-        n_estimators=500,
-        max_depth=5,
+    clf = lgb.LGBMClassifier(
+        n_estimators=1000,
         learning_rate=0.05,
+        max_depth=5,
+        num_leaves=31,
         subsample=0.8,
-        colsample_bytree=0.8,
-        eval_metric=["mlogloss", "merror"],
-        early_stopping_rounds=50,
+        colsample_bytree=0.7,
+        min_child_samples=10,
+        reg_alpha=0.0,
+        reg_lambda=1.0,
         random_state=42,
-        tree_method='hist',
-        device='cuda'
+        device='gpu',
+        n_jobs=-1,
+        verbose=-1,
     )
     return scaler, clf
 
-# ---------------------------------------------------------------------------
-# Training loop — agent can modify this too
-# ---------------------------------------------------------------------------
 
 def train(scaler, model, X_train, y_train, X_val, y_val):
-    """Train the model with eval_set for history tracking."""
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_val_scaled = scaler.transform(X_val)
-    
+    X_train_s = scaler.fit_transform(X_train)
+    X_val_s   = scaler.transform(X_val)
     model.fit(
-        X_train_scaled, y_train,
-        eval_set=[(X_train_scaled, y_train), (X_val_scaled, y_val)],
-        verbose=False
+        X_train_s, y_train,
+        eval_set=[(X_train_s, y_train), (X_val_s, y_val)],
+        callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(period=-1)],
     )
     return scaler, model
 
@@ -59,52 +63,42 @@ def train(scaler, model, X_train, y_train, X_val, y_val):
 
 if __name__ == "__main__":
     t0 = time.time()
-
-    # Load data
     X_train, X_val, y_train, y_val = load_data()
 
-    # Build + train
     scaler, model = build_model()
     scaler, model = train(scaler, model, X_train, y_train, X_val, y_val)
-    
-    # We'll create a simple wrapper so evaluate() (which expects .predict()) works.
-    class ModelWrapper:
-        def __init__(self, scaler, model):
-            self.scaler = scaler
-            self.model = model
-        def predict(self, X):
-            return self.model.predict(self.scaler.transform(X))
-            
-    wrapped_model = ModelWrapper(scaler, model)
 
+    class ModelWrapper:
+        def __init__(self, s, m): self.s, self.m = s, m
+        def predict(self, X): return self.m.predict(self.s.transform(X))
+
+    wrapped = ModelWrapper(scaler, model)
     t1 = time.time()
 
-    # Evaluate
-    results = evaluate(wrapped_model, X_val, y_val)
+    results = evaluate(wrapped, X_val, y_val)
     total_time = t1 - t0
 
-    # Print summary — agent reads this
     print("---")
     print(f"accuracy:        {results['accuracy']:.6f}")
     print(f"f1_macro:        {results['f1_macro']:.6f}")
     print(f"training_seconds:{total_time:.1f}")
-    print(f"model:           XGBClassifier")
+    print(f"model:           {MODEL_NAME}")
 
-    # ----- EVALUATION ARTIFACTS -----
+    # ---- Evaluation artifacts ----
     try:
-        commit_hash = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('utf-8').strip()
+        commit_hash = subprocess.check_output(
+            ['git', 'rev-parse', '--short', 'HEAD']).decode().strip()
     except Exception:
         commit_hash = "local_run"
-        
+
     out_dir = os.path.join("evaluation_output", commit_hash)
     os.makedirs(out_dir, exist_ok=True)
-    
-    X_val_scaled = scaler.transform(X_val)
-    preds = model.predict(X_val_scaled)
-    
+
+    preds = wrapped.predict(X_val)
+
     # 1. Confusion matrix
     cm = confusion_matrix(y_val, preds)
-    plt.figure(figsize=(6,5))
+    plt.figure(figsize=(6, 5))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
     plt.title('Confusion Matrix')
     plt.ylabel('True Label')
@@ -112,38 +106,30 @@ if __name__ == "__main__":
     plt.tight_layout()
     plt.savefig(os.path.join(out_dir, 'confusion_matrix.png'))
     plt.close()
-    
-    # 2. History plots (loss & acc)
+
+    # 2. Training history
     try:
-        evals_result = model.evals_result()
-        if evals_result:
-            epochs = len(evals_result['validation_0']['mlogloss'])
-            x_axis = range(0, epochs)
-            
-            fig, ax = plt.subplots(1, 2, figsize=(12,5))
-            
-            # Plot Log Loss
-            ax[0].plot(x_axis, evals_result['validation_0']['mlogloss'], label='Train')
-            ax[0].plot(x_axis, evals_result['validation_1']['mlogloss'], label='Val')
-            ax[0].legend()
-            ax[0].set_ylabel('Log Loss')
-            ax[0].set_title('XGBoost Log Loss')
-            
-            # Plot Accuracy (1 - merror)
-            ax[1].plot(x_axis, [1-e for e in evals_result['validation_0']['merror']], label='Train Acc')
-            ax[1].plot(x_axis, [1-e for e in evals_result['validation_1']['merror']], label='Val Acc')
-            ax[1].legend()
-            ax[1].set_ylabel('Accuracy')
-            ax[1].set_title('XGBoost Accuracy')
-            
-            plt.tight_layout()
-            plt.savefig(os.path.join(out_dir, 'history.png'))
-            plt.close()
+        er = model.evals_result_
+        sets = list(er.keys())
+        metrics = list(er[sets[0]].keys())
+        epochs = len(er[sets[0]][metrics[0]])
+        x_axis = range(epochs)
+        fig, ax = plt.subplots(1, 2, figsize=(12, 5))
+        ax[0].plot(x_axis, er[sets[0]][metrics[0]], label='Train')
+        ax[0].plot(x_axis, er[sets[1]][metrics[0]], label='Val')
+        ax[0].legend(); ax[0].set_ylabel(metrics[0]); ax[0].set_title(f'{metrics[0]}')
+        if len(metrics) > 1:
+            ax[1].plot(x_axis, er[sets[0]][metrics[1]], label='Train')
+            ax[1].plot(x_axis, er[sets[1]][metrics[1]], label='Val')
+            ax[1].legend(); ax[1].set_ylabel(metrics[1]); ax[1].set_title(f'{metrics[1]}')
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, 'history.png'))
+        plt.close()
     except Exception as e:
-        print(f"Warning: Could not plot history: {e}")
-    
+        print(f"Warning: history plot failed: {e}")
+
     # 3. Classification report
-    report_dict = classification_report(y_val, preds, output_dict=True)
-    report_df = pd.DataFrame(report_dict).transpose()
-    report_df.to_csv(os.path.join(out_dir, 'classification_report.csv'))
-    report_df.to_excel(os.path.join(out_dir, 'classification_report.xlsx'))
+    rep = classification_report(y_val, preds, output_dict=True)
+    df_rep = pd.DataFrame(rep).transpose()
+    df_rep.to_csv(os.path.join(out_dir, 'classification_report.csv'))
+    df_rep.to_excel(os.path.join(out_dir, 'classification_report.xlsx'))
