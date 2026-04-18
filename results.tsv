@@ -1,2 +1,4 @@
 commit	f1_macro	accuracy	status	description
 f890069	0.937348	0.937500	keep	baseline XGBoost with artifacts
+6f3b33d	0.937434	0.937500	keep	LGBMClassifier GPU
+43ea002	0.964986	0.965000	keep	LogisticRegression
